@@ -1,12 +1,17 @@
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.services.scene_builder import build_scene
 from app.services.image_search import find_matching_image
+from app.services.video_encoder import render_video
 
 
 _jobs = {}
 _lock = threading.Lock()
+
+GENERATED_DIR = Path("generated")
+GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def create_video_job(job_id: str, quote: str, style: str):
@@ -39,9 +44,9 @@ def create_video_job(job_id: str, quote: str, style: str):
 
 def process_video_job(job_id: str):
     try:
-        # --------------------------------
+        # -----------------------------
         # STEP 1: Analyze quote
-        # --------------------------------
+        # -----------------------------
         update_job(
             job_id,
             status="analyzing",
@@ -58,13 +63,13 @@ def process_video_job(job_id: str):
             style=job["style"],
         )
 
-        # --------------------------------
-        # STEP 2: Find matching visual
-        # --------------------------------
+        # -----------------------------
+        # STEP 2: Find visual
+        # -----------------------------
         update_job(
             job_id,
             status="finding_visual",
-            progress=35,
+            progress=25,
         )
 
         image = find_matching_image(
@@ -73,42 +78,48 @@ def process_video_job(job_id: str):
 
         scene["image"] = image
 
-        # --------------------------------
-        # STEP 3: Scene ready
-        # --------------------------------
         update_job(
             job_id,
             status="scene_ready",
-            progress=50,
+            progress=40,
             scene=scene,
             image=image,
         )
 
-        # --------------------------------
-        # STEP 4: Ready for video renderer
-        # --------------------------------
+        # -----------------------------
+        # STEP 3: Render video
+        # -----------------------------
         update_job(
             job_id,
-            status="ready_for_render",
-            progress=55,
+            status="rendering",
+            progress=45,
         )
 
-        # --------------------------------
-        # VIDEO RENDERER WILL BE ADDED NEXT
-        # --------------------------------
-        #
-        # render_video(...)
-        #
-        # Once the renderer is connected,
-        # this section will create the MP4.
-        #
+        output_path = GENERATED_DIR / f"{job_id}.mp4"
+
+        render_video(
+            quote=job["quote"],
+            image_path=image["local_path"],
+            style=job["style"],
+            output_path=str(output_path),
+        )
+
+        # -----------------------------
+        # STEP 4: Completed
+        # -----------------------------
+        update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            video_url=f"/api/v1/videos/{job_id}/file",
+        )
 
     except Exception as exc:
         update_job(
             job_id,
             status="failed",
-            error=str(exc),
             progress=0,
+            error=str(exc),
         )
 
 

@@ -1,5 +1,6 @@
 import html
 import json
+from pathlib import Path
 
 
 WIDTH = 1080
@@ -51,7 +52,14 @@ def build_canvas_html(
     config = STYLE_CONFIG[style_key]
 
     safe_quote = html.escape(quote)
-    image_url = image_path.replace("\\", "/")
+
+    # BUG FIX: image_path was relative (e.g. "assets/cache/xxx.jpg").
+    # "file://" + a relative path is not a valid file URL — Chromium
+    # parses everything after "file://" as a hostname, so the image
+    # silently failed to load and isCanvasReady() never returned true,
+    # which is why rendering hung until the 30s Playwright timeout.
+    # Path(...).resolve().as_uri() builds a correct absolute file:// URI.
+    absolute_image_uri = Path(image_path).resolve().as_uri()
 
     style_json = json.dumps(config)
 
@@ -99,11 +107,21 @@ const WIDTH = {WIDTH};
 const HEIGHT = {HEIGHT};
 
 const quote = {json.dumps(safe_quote)};
-const imagePath = {json.dumps("file://" + image_url)};
+const imagePath = {json.dumps(absolute_image_uri)};
 
 const style = {style_json};
 
 const image = new Image();
+
+// Idea: don't let a bad/missing image hang the whole render forever.
+// If the image fails to load for any reason, flip this flag so
+// isCanvasReady() still resolves and drawImage() falls back to a
+// plain dark background instead of timing out the entire job.
+let imageFailed = false;
+image.onerror = function() {{
+    imageFailed = true;
+}};
+
 image.src = imagePath;
 
 function clamp(value, min, max) {{
@@ -146,7 +164,9 @@ function wrapText(text, maxWidth) {{
 
 function drawImage(t) {{
 
-    if (!image.complete || image.naturalWidth === 0) {{
+    if (imageFailed || !image.complete || image.naturalWidth === 0) {{
+        ctx.fillStyle = "#111111";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
         return;
     }}
 
@@ -370,8 +390,8 @@ window.renderCanvasFrame = function(t) {{
 }};
 
 window.isCanvasReady = function() {{
-    return image.complete &&
-           image.naturalWidth > 0;
+    return imageFailed ||
+           (image.complete && image.naturalWidth > 0);
 }};
 
 </script>

@@ -1,4 +1,3 @@
-import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,17 +9,18 @@ from app.services.canvas_renderer import save_canvas_html
 
 WIDTH = 1080
 HEIGHT = 1920
-FPS = 60
-DURATION = 10
-TOTAL_FRAMES = FPS * DURATION
 
 
 def render_video(
     quote: str,
-    image_path: str,
+    image_paths,
     style: str,
     output_path: str,
+    fps: int = 30,
+    duration_seconds: int = 10,
 ):
+    total_frames = fps * duration_seconds
+
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -31,44 +31,24 @@ def render_video(
         save_canvas_html(
             output_path=str(html_path),
             quote=quote,
-            image_path=image_path,
+            image_paths=image_paths,
             style=style,
+            fps=fps,
+            duration_seconds=duration_seconds,
         )
 
         ffmpeg_command = [
-            "ffmpeg",
-            "-y",
-
-            # PNG frames arrive through stdin.
-            "-f",
-            "image2pipe",
-
-            "-vcodec",
-            "png",
-
-            "-r",
-            str(FPS),
-
-            "-i",
-            "-",
-
-            "-c:v",
-            "libx264",
-
-            "-preset",
-            "veryfast",
-
-            "-crf",
-            "20",
-
-            "-pix_fmt",
-            "yuv420p",
-
-            "-movflags",
-            "+faststart",
-
+            "ffmpeg", "-y",
+            "-f", "image2pipe",
+            "-vcodec", "png",
+            "-r", str(fps),
+            "-i", "-",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
             "-an",
-
             str(output_file),
         ]
 
@@ -81,89 +61,48 @@ def render_video(
 
         try:
             with sync_playwright() as playwright:
-
-                browser = playwright.chromium.launch(
-                    headless=True
-                )
-
+                browser = playwright.chromium.launch(headless=True)
                 page = browser.new_page(
-                    viewport={
-                        "width": WIDTH,
-                        "height": HEIGHT,
-                    },
+                    viewport={"width": WIDTH, "height": HEIGHT},
                     device_scale_factor=1,
                 )
+                page.goto(html_path.as_uri(), wait_until="load")
+                page.wait_for_function("window.isCanvasReady()")
 
-                page.goto(
-                    html_path.as_uri(),
-                    wait_until="load",
-                )
-
-                page.wait_for_function(
-                    "window.isCanvasReady()"
-                )
-
-                for frame_number in range(TOTAL_FRAMES):
-
-                    time_seconds = (
-                        frame_number / FPS
-                    )
-
+                for frame_number in range(total_frames):
+                    time_seconds = frame_number / fps
                     page.evaluate(
                         """
-                        (time) => {
-                            window.renderCanvasFrame(time);
-                        }
+                        (time) => { window.renderCanvasFrame(time); }
                         """,
                         time_seconds,
                     )
-
-                    png_bytes = page.locator(
-                        "#canvas"
-                    ).screenshot(
-                        type="png"
-                    )
-
-                    process.stdin.write(
-                        png_bytes
-                    )
+                    png_bytes = page.locator("#canvas").screenshot(type="png")
+                    process.stdin.write(png_bytes)
 
                 browser.close()
 
             process.stdin.close()
-
             return_code = process.wait()
 
             if return_code != 0:
-                error = process.stderr.read().decode(
-                    "utf-8",
-                    errors="replace",
-                )
-
-                raise RuntimeError(
-                    f"FFmpeg failed:\\n{error}"
-                )
+                error = process.stderr.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"FFmpeg failed:\\n{error}")
 
         except Exception:
-
             try:
                 process.stdin.close()
             except Exception:
                 pass
-
             process.terminate()
-
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-
             raise
 
     if not output_file.exists():
-        raise RuntimeError(
-            "Video rendering completed but MP4 was not created."
-        )
+        raise RuntimeError("Video rendering completed but MP4 was not created.")
 
     return str(output_file)

@@ -25,9 +25,7 @@ def search_pexels(query: str, per_page: int = 10):
 
     response = httpx.get(
         "https://api.pexels.com/v1/search",
-        headers={
-            "Authorization": PEXELS_API_KEY,
-        },
+        headers={"Authorization": PEXELS_API_KEY},
         params={
             "query": query,
             "orientation": "portrait",
@@ -49,12 +47,7 @@ def download_image(url: str, image_id: str) -> str:
     if output_path.exists():
         return str(output_path)
 
-    response = httpx.get(
-        url,
-        timeout=30,
-        follow_redirects=True,
-    )
-
+    response = httpx.get(url, timeout=30, follow_redirects=True)
     response.raise_for_status()
 
     output_path.write_bytes(response.content)
@@ -66,20 +59,12 @@ def find_matching_image(scene_description: str):
     photos = search_pexels(scene_description)
 
     if not photos:
-        raise RuntimeError(
-            "No matching image was found."
-        )
+        raise RuntimeError("No matching image was found.")
 
     photo = photos[0]
-
     image_id = create_image_id(photo["id"].__str__())
-
     image_url = photo["src"]["large2x"]
-
-    local_path = download_image(
-        image_url,
-        image_id,
-    )
+    local_path = download_image(image_url, image_id)
 
     return {
         "image_id": image_id,
@@ -88,3 +73,47 @@ def find_matching_image(scene_description: str):
         "photographer": photo.get("photographer"),
         "source": "pexels",
     }
+
+
+# Idea: when searching for several images off similar scene
+# descriptions, Pexels can easily return overlapping top results. This
+# tracks photo IDs already used and skips them when possible, so a
+# 5-image video is actually 5 different photos rather than the same
+# one downloaded five times under different cache names.
+def find_matching_images(scene_descriptions):
+    images = []
+    used_ids = set()
+
+    for description in scene_descriptions:
+        photos = search_pexels(description)
+
+        if not photos:
+            raise RuntimeError(
+                f"No matching image was found for: {description}"
+            )
+
+        photo = None
+        for candidate in photos:
+            candidate_id = str(candidate["id"])
+            if candidate_id not in used_ids:
+                photo = candidate
+                break
+
+        if photo is None:
+            photo = photos[0]
+
+        used_ids.add(str(photo["id"]))
+
+        image_id = create_image_id(photo["id"].__str__())
+        image_url = photo["src"]["large2x"]
+        local_path = download_image(image_url, image_id)
+
+        images.append({
+            "image_id": image_id,
+            "image_url": image_url,
+            "local_path": local_path,
+            "photographer": photo.get("photographer"),
+            "source": "pexels",
+        })
+
+    return images

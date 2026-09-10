@@ -10,6 +10,37 @@ from app.services.canvas_renderer import save_canvas_html
 WIDTH = 1080
 HEIGHT = 1920
 
+# Idea/fix: default headless Chromium keeps GPU compositing, extension
+# scaffolding, background networking, sync, translate, and other
+# desktop-browser features running even though this is a fully
+# automated single-page render job that needs none of them. Each of
+# these carries its own memory overhead. Disabling them, plus capping
+# the JS heap, lowers Chromium's baseline footprint before it even
+# loads the page — directly targeting the "crashes even at minimum
+# video settings" symptom, since that pointed at fixed browser
+# overhead rather than render workload.
+CHROMIUM_LAUNCH_ARGS = [
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-breakpad",
+    "--disable-client-side-phishing-detection",
+    "--disable-default-apps",
+    "--disable-hang-monitor",
+    "--disable-popup-blocking",
+    "--disable-prompt-on-repost",
+    "--disable-sync",
+    "--disable-translate",
+    "--metrics-recording-only",
+    "--no-first-run",
+    "--safebrowsing-disable-auto-update",
+    "--no-sandbox",
+    "--js-flags=--max-old-space-size=128",
+]
+
 
 def render_video(
     quote: str,
@@ -61,17 +92,11 @@ def render_video(
 
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    args=CHROMIUM_LAUNCH_ARGS,
+                )
 
-                # Idea/fix: browser.close() previously only ran on the
-                # success path — if anything in the render loop raised
-                # (a bad frame, a page crash, a screenshot timeout),
-                # the browser process could be left running in the
-                # background, still holding its memory, since nothing
-                # explicitly closed it on that path. This `finally`
-                # guarantees close() runs every time control leaves
-                # this block, success or failure, so a failed job
-                # can no longer leave a zombie Chromium process behind.
                 try:
                     page = browser.new_page(
                         viewport={"width": WIDTH, "height": HEIGHT},

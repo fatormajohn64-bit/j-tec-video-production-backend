@@ -1,285 +1,231 @@
-import html
-import json
 from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
 
 
 WIDTH = 1080
 HEIGHT = 1920
 
+FONT_BOLD = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+
 
 STYLE_CONFIG = {
-    "dark": {"overlay": "rgba(0,0,0,0.58)", "text": "#ffffff", "accent": "#aaaaaa"},
-    "soft": {"overlay": "rgba(20,20,20,0.30)", "text": "#ffffff", "accent": "#eeeeee"},
-    "colourful": {"overlay": "rgba(30,10,60,0.30)", "text": "#ffffff", "accent": "#ffe082"},
-    "cinematic": {"overlay": "rgba(0,0,0,0.45)", "text": "#ffffff", "accent": "#f5d58a"},
-    "powerful": {"overlay": "rgba(0,0,0,0.52)", "text": "#ffffff", "accent": "#ffcc66"},
+    "dark":      {"overlay": (0, 0, 0, 148),   "text": (255, 255, 255), "accent": (170, 170, 170)},
+    "soft":      {"overlay": (20, 20, 20, 77), "text": (255, 255, 255), "accent": (238, 238, 238)},
+    "colourful": {"overlay": (30, 10, 60, 77), "text": (255, 255, 255), "accent": (255, 224, 130)},
+    "cinematic": {"overlay": (0, 0, 0, 115),   "text": (255, 255, 255), "accent": (245, 213, 138)},
+    "powerful":  {"overlay": (0, 0, 0, 133),   "text": (255, 255, 255), "accent": (255, 204, 102)},
 }
 
 
-def build_canvas_html(
-    quote: str,
-    image_paths,
-    style: str = "cinematic",
-    fps: int = 30,
-    duration_seconds: int = 10,
-) -> str:
+def clamp(value, low, high):
+    return max(low, min(high, value))
 
-    style_key = style.lower().strip()
-    if style_key not in STYLE_CONFIG:
-        style_key = "cinematic"
+
+def ease_in_out(t):
+    return 2 * t * t if t < 0.5 else 1 - ((-2 * t + 2) ** 2) / 2
+
+
+def resolve_style(style):
+    key = style.lower().strip()
+    return key if key in STYLE_CONFIG else "cinematic"
+
+
+# Idea kept from the earlier fix: a bad/missing image no longer fails
+# the whole job. Pillow raises immediately on a broken file (unlike
+# the old async onerror check), so we catch it per-image here and
+# fall back to a plain dark frame instead of crashing the render.
+def prepare_images(image_paths):
+    prepared = []
+    for path in image_paths:
+        try:
+            img = Image.open(path).convert("RGB")
+            scale = max(WIDTH / img.width, HEIGHT / img.height)
+            new_w = max(WIDTH, int(img.width * scale) + 1)
+            new_h = max(HEIGHT, int(img.height * scale) + 1)
+            prepared.append(img.resize((new_w, new_h), Image.LANCZOS))
+        except Exception:
+            prepared.append(Image.new("RGB", (WIDTH, HEIGHT), (17, 17, 17)))
+    return prepared
+
+
+def build_overlay_gradient(style_key):
     config = STYLE_CONFIG[style_key]
+    top = (0, 0, 0, 46)
+    mid = config["overlay"]
+    bottom = (0, 0, 0, 191)
+    stops = [(0.0, top), (0.45, mid), (1.0, bottom)]
 
-    safe_quote = html.escape(quote)
+    gradient = Image.new("RGBA", (1, HEIGHT))
+    for y in range(HEIGHT):
+        t = y / (HEIGHT - 1)
+        for i in range(len(stops) - 1):
+            t0, c0 = stops[i]
+            t1, c1 = stops[i + 1]
+            if t0 <= t <= t1:
+                local = 0 if t1 == t0 else (t - t0) / (t1 - t0)
+                color = tuple(int(c0[ch] + (c1[ch] - c0[ch]) * local) for ch in range(4))
+                gradient.putpixel((0, y), color)
+                break
 
-    if not image_paths:
-        raise ValueError("At least one image_path is required.")
-
-    absolute_image_uris = [Path(p).resolve().as_uri() for p in image_paths]
-
-    style_json = json.dumps(config)
-    image_uris_json = json.dumps(absolute_image_uris)
-
-    return f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    html, body {{
-        width: {WIDTH}px;
-        height: {HEIGHT}px;
-        overflow: hidden;
-        background: #000;
-    }}
-    canvas {{ display: block; width: {WIDTH}px; height: {HEIGHT}px; }}
-</style>
-</head>
-<body>
-<canvas id="canvas" width="{WIDTH}" height="{HEIGHT}"></canvas>
-<script>
-
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-
-const WIDTH = {WIDTH};
-const HEIGHT = {HEIGHT};
-const DURATION = {duration_seconds};
-const FPS = {fps};
-
-const quote = {json.dumps(safe_quote)};
-const imagePaths = {image_uris_json};
-const style = {style_json};
-
-// Each image gets its own load/failure state. A failed image just
-// falls back to a dark background instead of hanging the whole
-// render — same idea as the earlier single-image fix, now applied
-// per-image since more images means more chances for one to fail.
-const images = imagePaths.map(function(src) {{
-    const state = {{ failed: false }};
-    const img = new Image();
-    img.onerror = function() {{ state.failed = true; }};
-    img.src = src;
-    state.img = img;
-    return state;
-}});
-
-function clamp(value, min, max) {{
-    return Math.max(min, Math.min(max, value));
-}}
-
-function easeInOut(t) {{
-    return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-}}
-
-function wrapText(text, maxWidth) {{
-    const words = text.split(" ");
-    const lines = [];
-    let line = "";
-    for (const word of words) {{
-        const testLine = line ? line + " " + word : word;
-        if (ctx.measureText(testLine).width > maxWidth && line) {{
-            lines.push(line);
-            line = word;
-        }} else {{
-            line = testLine;
-        }}
-    }}
-    if (line) {{ lines.push(line); }}
-    return lines;
-}}
-
-// Idea: the timeline splits into one equal segment per image, with a
-// short crossfade at each boundary — reads as an intentional
-// multi-shot edit instead of a jarring hard cut between photos.
-const CROSSFADE_SECONDS = Math.min(0.6, (DURATION / images.length) / 2);
-
-function getActiveSegment(t) {{
-    const segmentDuration = DURATION / images.length;
-    let index = Math.floor(t / segmentDuration);
-    index = clamp(index, 0, images.length - 1);
-    const segmentStart = index * segmentDuration;
-    return {{
-        index: index,
-        segmentDuration: segmentDuration,
-        localT: t - segmentStart,
-    }};
-}}
-
-function drawSingleImage(state, progress) {{
-    if (state.failed || !state.img.complete || state.img.naturalWidth === 0) {{
-        return false;
-    }}
-    const img = state.img;
-    const scale = Math.max(WIDTH / img.naturalWidth, HEIGHT / img.naturalHeight);
-    const imageWidth = img.naturalWidth * scale;
-    const imageHeight = img.naturalHeight * scale;
-    const maxX = Math.max(0, imageWidth - WIDTH);
-    const maxY = Math.max(0, imageHeight - HEIGHT);
-    const eased = easeInOut(clamp(progress, 0, 1));
-    const zoom = 1.0 + (0.08 * eased);
-    const drawWidth = imageWidth * zoom;
-    const drawHeight = imageHeight * zoom;
-    const x = -(maxX * eased);
-    const y = -(maxY * eased * 0.35);
-    ctx.drawImage(img, x, y, drawWidth, drawHeight);
-    return true;
-}}
-
-function drawImages(t) {{
-    const segment = getActiveSegment(t);
-    const segProgress = segment.localT / segment.segmentDuration;
-
-    const current = images[segment.index];
-    const drewCurrent = drawSingleImage(current, segProgress);
-
-    if (!drewCurrent) {{
-        ctx.fillStyle = "#111111";
-        ctx.fillRect(0, 0, WIDTH, HEIGHT);
-    }}
-
-    const timeLeftInSegment = segment.segmentDuration - segment.localT;
-
-    if (segment.index < images.length - 1 && timeLeftInSegment < CROSSFADE_SECONDS) {{
-        const next = images[segment.index + 1];
-        const fadeIn = clamp(1 - (timeLeftInSegment / CROSSFADE_SECONDS), 0, 1);
-        ctx.save();
-        ctx.globalAlpha = fadeIn;
-        drawSingleImage(next, 0);
-        ctx.restore();
-    }}
-}}
-
-function drawOverlay() {{
-    const gradient = ctx.createLinearGradient(0, 0, 0, HEIGHT);
-    gradient.addColorStop(0, "rgba(0,0,0,0.18)");
-    gradient.addColorStop(0.45, style.overlay);
-    gradient.addColorStop(1, "rgba(0,0,0,0.75)");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, WIDTH, HEIGHT);
-}}
-
-function drawQuote(t) {{
-    const fadeDuration = Math.min(0.6, DURATION * 0.12);
-    const start = fadeDuration + 0.2;
-    const end = DURATION - (fadeDuration + 0.2);
-
-    let opacity = 1;
-
-    if (t < start) {{
-        opacity = clamp((t - 0.2) / fadeDuration, 0, 1);
-    }}
-    if (t > end) {{
-        opacity = clamp(1 - ((t - end) / fadeDuration), 0, 1);
-    }}
-
-    const localTime = clamp((t - start) / Math.max(0.4, fadeDuration * 1.5), 0, 1);
-    const animation = easeInOut(localTime);
-    const yOffset = 80 * (1 - animation);
-
-    ctx.save();
-    ctx.globalAlpha = opacity;
-    ctx.font = "700 68px Arial, Helvetica, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-
-    const maxWidth = 850;
-    const lines = wrapText(quote, maxWidth);
-    const lineHeight = 92;
-    const totalHeight = lines.length * lineHeight;
-    const centerY = HEIGHT / 2 - totalHeight / 2;
-
-    ctx.shadowColor = "rgba(0,0,0,0.65)";
-    ctx.shadowBlur = 25;
-    ctx.shadowOffsetY = 8;
-    ctx.fillStyle = style.text;
-
-    lines.forEach((line, index) => {{
-        ctx.fillText(line, WIDTH / 2, centerY + index * lineHeight + yOffset);
-    }});
-
-    ctx.restore();
-}}
-
-function drawBranding() {{
-    ctx.save();
-    ctx.globalAlpha = 0.82;
-    ctx.font = "600 30px Arial, Helvetica, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillStyle = style.accent;
-    ctx.fillText("J TEC VIDEO PRODUCTION", WIDTH / 2, HEIGHT - 100);
-    ctx.restore();
-}}
-
-function drawVignette() {{
-    const gradient = ctx.createRadialGradient(
-        WIDTH / 2, HEIGHT / 2, HEIGHT * 0.2,
-        WIDTH / 2, HEIGHT / 2, HEIGHT * 0.8
-    );
-    gradient.addColorStop(0, "rgba(0,0,0,0)");
-    gradient.addColorStop(1, "rgba(0,0,0,0.65)");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, WIDTH, HEIGHT);
-}}
-
-window.renderCanvasFrame = function(t) {{
-    ctx.clearRect(0, 0, WIDTH, HEIGHT);
-    drawImages(t);
-    drawOverlay();
-    drawQuote(t);
-    drawBranding();
-    drawVignette();
-}};
-
-window.isCanvasReady = function() {{
-    return images.every(function(state) {{
-        return state.failed || (state.img.complete && state.img.naturalWidth > 0);
-    }});
-}};
-
-</script>
-</body>
-</html>
-"""
+    return gradient.resize((WIDTH, HEIGHT))
 
 
-def save_canvas_html(
-    output_path: str,
-    quote: str,
-    image_paths,
-    style: str = "cinematic",
-    fps: int = 30,
-    duration_seconds: int = 10,
+def build_vignette():
+    # Built at low resolution then scaled up — a radial gradient has no
+    # fine detail to lose, and this avoids a 2-million-pixel Python loop.
+    scale = 10
+    sw, sh = WIDTH // scale, HEIGHT // scale
+    vignette = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    cx, cy = WIDTH / 2, HEIGHT / 2
+    inner = HEIGHT * 0.2
+    outer = HEIGHT * 0.8
+    max_alpha = 166
+
+    pixels = vignette.load()
+    for y in range(sh):
+        for x in range(sw):
+            dx = (x * scale) - cx
+            dy = (y * scale) - cy
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist <= inner:
+                a = 0
+            elif dist >= outer:
+                a = max_alpha
+            else:
+                a = int(max_alpha * (dist - inner) / (outer - inner))
+            pixels[x, y] = (0, 0, 0, a)
+
+    return vignette.resize((WIDTH, HEIGHT), Image.BILINEAR)
+
+
+def build_branding_layer(style_key):
+    config = STYLE_CONFIG[style_key]
+    layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    font = ImageFont.truetype(FONT_BOLD, 30)
+
+    text = "J TEC VIDEO PRODUCTION"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    x = (WIDTH - text_w) / 2
+    y = HEIGHT - 100
+
+    color = config["accent"] + (int(255 * 0.82),)
+    draw.text((x, y), text, font=font, fill=color)
+    return layer
+
+
+def wrap_text(draw, text, font, max_width):
+    words = text.split(" ")
+    lines = []
+    line = ""
+    for word in words:
+        test_line = f"{line} {word}".strip()
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        if (bbox[2] - bbox[0]) > max_width and line:
+            lines.append(line)
+            line = word
+        else:
+            line = test_line
+    if line:
+        lines.append(line)
+    return lines
+
+
+def draw_quote_layer(quote, style_key, t, duration):
+    config = STYLE_CONFIG[style_key]
+    layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    font = ImageFont.truetype(FONT_BOLD, 68)
+
+    fade_duration = min(0.6, duration * 0.12)
+    start = fade_duration + 0.2
+    end = duration - (fade_duration + 0.2)
+
+    opacity = 1.0
+    if t < start:
+        opacity = clamp((t - 0.2) / fade_duration, 0, 1)
+    if t > end:
+        opacity = clamp(1 - ((t - end) / fade_duration), 0, 1)
+
+    local_time = clamp((t - start) / max(0.4, fade_duration * 1.5), 0, 1)
+    animation = ease_in_out(local_time)
+    y_offset = 80 * (1 - animation)
+
+    max_width = 850
+    lines = wrap_text(draw, quote, font, max_width)
+    line_height = 92
+    total_height = len(lines) * line_height
+    center_y = HEIGHT / 2 - total_height / 2
+
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        text_w = bbox[2] - bbox[0]
+        x = (WIDTH - text_w) / 2
+        y = center_y + i * line_height + y_offset
+
+        # Simple offset shadow (no blur) — a lighter-weight stand-in
+        # for the canvas version's shadowBlur, kept fast per-frame.
+        draw.text((x + 3, y + 6), line, font=font, fill=(0, 0, 0, int(160 * opacity)))
+        draw.text((x, y), line, font=font, fill=config["text"] + (int(255 * opacity),))
+
+    return layer
+
+
+def get_active_segment(t, duration, num_images):
+    segment_duration = duration / num_images
+    index = clamp(int(t // segment_duration), 0, num_images - 1)
+    local_t = t - (index * segment_duration)
+    return index, segment_duration, local_t
+
+
+def draw_single_image(prepared_img, progress):
+    eased = ease_in_out(clamp(progress, 0, 1))
+    zoom = 1.0 + (0.08 * eased)
+    draw_w = int(prepared_img.width * zoom)
+    draw_h = int(prepared_img.height * zoom)
+    resized = prepared_img.resize((draw_w, draw_h), Image.BILINEAR)
+
+    max_x = max(0, draw_w - WIDTH)
+    max_y = max(0, draw_h - HEIGHT)
+    x = int(max_x * eased)
+    y = int(max_y * eased * 0.35)
+
+    return resized.crop((x, y, x + WIDTH, y + HEIGHT))
+
+
+def draw_background(t, prepared_images, duration):
+    num_images = len(prepared_images)
+    index, seg_dur, local_t = get_active_segment(t, duration, num_images)
+    progress = local_t / seg_dur if seg_dur > 0 else 0
+
+    current = draw_single_image(prepared_images[index], progress)
+
+    crossfade_seconds = min(0.6, seg_dur / 2) if seg_dur > 0 else 0
+    time_left = seg_dur - local_t
+
+    if index < num_images - 1 and crossfade_seconds > 0 and time_left < crossfade_seconds:
+        next_img = draw_single_image(prepared_images[index + 1], 0)
+        fade_in = clamp(1 - (time_left / crossfade_seconds), 0, 1)
+        current = Image.blend(current, next_img, fade_in)
+
+    return current
+
+
+def render_frame(
+    t,
+    duration,
+    prepared_images,
+    quote,
+    style_key,
+    overlay_layer,
+    vignette_layer,
+    branding_layer,
 ):
-    html_content = build_canvas_html(
-        quote=quote,
-        image_paths=image_paths,
-        style=style,
-        fps=fps,
-        duration_seconds=duration_seconds,
-    )
-
-    with open(output_path, "w", encoding="utf-8") as file:
-        file.write(html_content)
-
-    return output_path
+    frame = draw_background(t, prepared_images, duration).convert("RGBA")
+    frame.alpha_composite(overlay_layer)
+    frame.alpha_composite(draw_quote_layer(quote, style_key, t, duration))
+    frame.alpha_composite(branding_layer)
+    frame.alpha_composite(vignette_layer)
+    return frame.convert("RGB")

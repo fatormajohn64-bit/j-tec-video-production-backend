@@ -62,25 +62,36 @@ def render_video(
         try:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=True)
-                page = browser.new_page(
-                    viewport={"width": WIDTH, "height": HEIGHT},
-                    device_scale_factor=1,
-                )
-                page.goto(html_path.as_uri(), wait_until="load")
-                page.wait_for_function("window.isCanvasReady()")
 
-                for frame_number in range(total_frames):
-                    time_seconds = frame_number / fps
-                    page.evaluate(
-                        """
-                        (time) => { window.renderCanvasFrame(time); }
-                        """,
-                        time_seconds,
+                # Idea/fix: browser.close() previously only ran on the
+                # success path — if anything in the render loop raised
+                # (a bad frame, a page crash, a screenshot timeout),
+                # the browser process could be left running in the
+                # background, still holding its memory, since nothing
+                # explicitly closed it on that path. This `finally`
+                # guarantees close() runs every time control leaves
+                # this block, success or failure, so a failed job
+                # can no longer leave a zombie Chromium process behind.
+                try:
+                    page = browser.new_page(
+                        viewport={"width": WIDTH, "height": HEIGHT},
+                        device_scale_factor=1,
                     )
-                    png_bytes = page.locator("#canvas").screenshot(type="png")
-                    process.stdin.write(png_bytes)
+                    page.goto(html_path.as_uri(), wait_until="load")
+                    page.wait_for_function("window.isCanvasReady()")
 
-                browser.close()
+                    for frame_number in range(total_frames):
+                        time_seconds = frame_number / fps
+                        page.evaluate(
+                            """
+                            (time) => { window.renderCanvasFrame(time); }
+                            """,
+                            time_seconds,
+                        )
+                        png_bytes = page.locator("#canvas").screenshot(type="png")
+                        process.stdin.write(png_bytes)
+                finally:
+                    browser.close()
 
             process.stdin.close()
             return_code = process.wait()

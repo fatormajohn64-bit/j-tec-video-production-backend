@@ -1,3 +1,5 @@
+import json
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,24 +9,71 @@ from app.services.image_search import find_matching_images
 from app.services.video_encoder import render_video
 
 
-_jobs = {}
-_lock = threading.Lock()
-
 GENERATED_DIR = Path("generated")
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = GENERATED_DIR / "jobs.db"
+_db_lock = threading.Lock()
 
 ALLOWED_FPS = [10, 20, 30, 50, 60]
 ALLOWED_DURATIONS = [4, 5, 6, 7, 8, 9, 10, 15, 20]
 
-# Idea: a 10s/60fps single-image video already crashed the free-tier
-# Render instance (0.15 CPU / 512MB) around the 3-minute mark. Frame
-# count (fps x duration) drives Playwright/FFmpeg load — not image
-# count — so this cap protects against combos like 60fps x 20s that
-# would reliably crash on this tier. This number is a conservative
-# starting guess, not a measured limit. Tune it once you've tested
-# how far this Render plan can actually go, or drop it once you
-# upgrade off the free tier.
+# Idea (kept from before): a 10s/60fps single-image video already
+# crashed the free-tier Render instance. This caps total frames as a
+# safety net. NOTE: if restarts are happening even at 10fps/4s (40
+# frames), frame count likely isn't the real cause — see the note in
+# process_video_job below.
 MAX_SAFE_FRAMES = 240
+
+
+def _get_connection():
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db():
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_id TEXT PRIMARY KEY,
+                    quote TEXT,
+                    style TEXT,
+                    requested_fps INTEGER,
+                    requested_duration_seconds INTEGER,
+                    fps INTEGER,
+                    duration_seconds INTEGER,
+                    num_images INTEGER,
+                    adjustments TEXT,
+                    status TEXT,
+                    progress INTEGER,
+                    scene TEXT,
+                    images TEXT,
+                    video_url TEXT,
+                    error TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+_init_db()
+
+
+def _row_to_job(row):
+    if row is None:
+        return None
+    job = dict(row)
+    job["adjustments"] = json.loads(job["adjustments"]) if job["adjustments"] else []
+    job["scene"] = json.loads(job["scene"]) if job["scene"] else None
+    job["images"] = json.loads(job["images"]) if job["images"] else None
+    return job
 
 
 def resolve_render_settings(requested_fps, requested_duration):
@@ -39,7 +88,6 @@ def resolve_render_settings(requested_fps, requested_duration):
             [f for f in ALLOWED_FPS if f * duration <= MAX_SAFE_FRAMES],
             reverse=True,
         )
-
         if fps_options:
             new_fps = fps_options[0]
             if new_fps != fps:
@@ -92,8 +140,28 @@ def create_video_job(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    with _lock:
-        _jobs[job_id] = job
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO jobs (
+                    job_id, quote, style, requested_fps, requested_duration_seconds,
+                    fps, duration_seconds, num_images, adjustments, status, progress,
+                    scene, images, video_url, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job["job_id"], job["quote"], job["style"],
+                    job["requested_fps"], job["requested_duration_seconds"],
+                    job["fps"], job["duration_seconds"], job["num_images"],
+                    json.dumps(job["adjustments"]), job["status"], job["progress"],
+                    None, None, job["video_url"], job["error"], job["created_at"],
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     thread = threading.Thread(target=process_video_job, args=(job_id,), daemon=True)
     thread.start()
@@ -149,11 +217,34 @@ def process_video_job(job_id: str):
 
 
 def update_job(job_id: str, **changes):
-    with _lock:
-        if job_id in _jobs:
-            _jobs[job_id].update(changes)
+    if "adjustments" in changes:
+        changes["adjustments"] = json.dumps(changes["adjustments"])
+    if "scene" in changes:
+        changes["scene"] = json.dumps(changes["scene"]) if changes["scene"] is not None else None
+    if "images" in changes:
+        changes["images"] = json.dumps(changes["images"]) if changes["images"] is not None else None
+
+    if not changes:
+        return
+
+    columns = ", ".join(f"{key} = ?" for key in changes.keys())
+    values = list(changes.values()) + [job_id]
+
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            conn.execute(f"UPDATE jobs SET {columns} WHERE job_id = ?", values)
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def get_video_job(job_id: str):
-    with _lock:
-        return _jobs.get(job_id)
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+            row = cursor.fetchone()
+            return _row_to_job(row)
+        finally:
+            conn.close()

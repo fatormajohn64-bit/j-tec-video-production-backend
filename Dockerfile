@@ -2,38 +2,20 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install FFmpeg and Chromium dependencies
+# FFmpeg for encoding, fonts-liberation for text rendering (Pillow
+# needs an actual .ttf font file — Liberation Sans is metric-compatible
+# with Arial, so it looks the same as before). No more Chromium/browser
+# dependencies — Pillow draws frames directly, no headless browser needed.
 RUN apt-get update && \
     apt-get install -y \
     ffmpeg \
-    wget \
     ca-certificates \
     fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libu2f-udev \
-    libvulkan1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
-    xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
-
-RUN playwright install chromium
 
 COPY . .
 
